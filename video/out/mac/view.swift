@@ -49,6 +49,22 @@ class View: NSView, CALayerDelegate {
         fatalError("init(coder:) has not been implemented")
     }
 
+    override func viewDidMoveToWindow() {
+        super.viewDidMoveToWindow()
+        layer?.contentsScale = window?.backingScaleFactor ?? 1
+        common.updateDisplaylink()
+        common.windowDidChangeScreenProfile()
+        common.windowDidResize()
+    }
+
+    override func setFrameSize(_ newSize: NSSize) {
+        let oldSize = frame.size
+        super.setFrameSize(newSize)
+        if oldSize != newSize {
+            common.windowDidResize()
+        }
+    }
+
     override func updateTrackingAreas() {
         if let tracker = self.tracker {
             removeTrackingArea(tracker)

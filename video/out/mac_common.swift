@@ -53,13 +53,17 @@ class MacCommon: Common {
                 exit(1)
             }
 
-            if window == nil {
+            if !initEmbeddedView(vo, layer) && window == nil {
                 initView(vo, layer)
                 initWindow(vo, previousActiveApp)
                 initWindowState()
             }
 
-            if forcePosition {
+            if embeddedView != nil {
+                log.verbose("Using embedded macOS video surface")
+                view?.frame = embeddedView?.bounds ?? .zero
+                view?.layer?.contentsScale = currentBackingScaleFactor
+            } else if forcePosition {
                 window?.updateFrame(wr, screen)
             } else if option.vo.auto_window_resize {
                 window?.updateSize(wr.size)
@@ -82,8 +86,10 @@ class MacCommon: Common {
         timer?.terminate()
 
         DispatchQueue.main.sync {
-            window?.delegate = nil
-            window?.close()
+            if embeddedView == nil {
+                window?.delegate = nil
+                window?.close()
+            }
 
             uninitCommon()
         }
@@ -110,7 +116,11 @@ class MacCommon: Common {
     }
 
     @objc func isVisible() -> Bool {
+        let embeddedVisible = embeddedView.map {
+            !$0.isHidden && ($0.window?.occlusionState.contains(.visible) ?? true)
+        } ?? false
         return window?.occlusionState.contains(.visible) ?? false ||
+               embeddedVisible ||
                option.vo.force_render ||
                needsInitialDraw
     }
@@ -118,8 +128,12 @@ class MacCommon: Common {
     @objc func update(alpha: Bool) {
         layer?.wantsAlpha = alpha
         DispatchQueue.main.sync {
-            window?.isOpaque = !alpha
-            window?.backgroundColor = alpha ? NSColor.clear : nil
+            if let window = window {
+                window.isOpaque = !alpha
+                window.backgroundColor = alpha ? NSColor.clear : nil
+            } else {
+                embeddedView?.layer?.backgroundColor = (alpha ? NSColor.clear : NSColor.black).cgColor
+            }
         }
     }
 
@@ -175,7 +189,7 @@ class MacCommon: Common {
     }
 
     override func windowDidChangeBackingProperties() {
-        layer?.contentsScale = window?.backingScaleFactor ?? 1
+        layer?.contentsScale = currentBackingScaleFactor
         windowDidResize()
     }
 

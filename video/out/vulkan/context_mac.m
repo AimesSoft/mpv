@@ -113,11 +113,7 @@ error:
 static bool resize(struct ra_ctx *ctx)
 {
     struct priv *p = ctx->priv;
-
-    if (!p->vo_mac.window) {
-        return false;
-    }
-    CGSize size = p->vo_mac.window.framePixel.size;
+    CGSize size = p->vo_mac.framePixel.size;
 
     return ra_vk_ctx_resize(ctx, (int)size.width, (int)size.height);
 }
