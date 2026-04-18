@@ -26,6 +26,7 @@ class Common: NSObject {
 
     @objc var window: Window?
     var view: View?
+    var embeddedView: NSView?
     var titleBar: TitleBar?
 
     var link: CVDisplayLink?
@@ -47,6 +48,27 @@ class Common: NSObject {
 
     var title: String = "mpv" {
         didSet { if let window = window { window.title = title } }
+    }
+
+    var currentWindow: NSWindow? {
+        return window ?? embeddedView?.window
+    }
+
+    var currentBackingScaleFactor: CGFloat {
+        return currentWindow?.backingScaleFactor ??
+               getCurrentScreen()?.backingScaleFactor ??
+               1.0
+    }
+
+    @objc var framePixel: NSRect {
+        let bounds = view?.bounds ?? embeddedView?.bounds ?? window?.frame ?? NSRect(x: 0, y: 0, width: 1, height: 1)
+        let frame = view?.convertToBacking(bounds) ??
+                    embeddedView?.convertToBacking(bounds) ??
+                    window?.convertToBacking(bounds) ??
+                    bounds
+        let width = max(frame.size.width, 1)
+        let height = max(frame.size.height, 1)
+        return NSRect(x: frame.origin.x, y: frame.origin.y, width: width, height: height)
     }
 
     init(_ option: OptionHelper, _ log: LogHelper) {
@@ -77,6 +99,8 @@ class Common: NSObject {
 
     func initWindow(_ vo: UnsafeMutablePointer<vo>, _ previousActiveApp: NSRunningApplication?) {
         let (targetScreen, wr, _) = getInitProperties(vo)
+
+        log.warning("Falling back to standalone macOS mpv window")
 
         guard let view = self.view else {
             log.error("Something went wrong, no View was initialized")
@@ -135,6 +159,61 @@ class Common: NSObject {
         layer.delegate = view
     }
 
+    func getEmbeddingView() -> NSView? {
+        let wid = option.vo.WinID
+        guard wid > 0 else { return nil }
+        guard let pointer = UnsafeRawPointer(bitPattern: Int(wid)) else {
+            log.warning("Ignoring invalid macOS --wid value: \(wid)")
+            return nil
+        }
+
+        let object = Unmanaged<AnyObject>.fromOpaque(pointer).takeUnretainedValue()
+        if let view = object as? NSView {
+            return view
+        }
+        if let window = object as? NSWindow {
+            return window.contentView
+        }
+
+        log.warning("Ignoring macOS --wid value that is neither NSView nor NSWindow")
+        return nil
+    }
+
+    func initEmbeddedView(_ vo: UnsafeMutablePointer<vo>, _ layer: CALayer) -> Bool {
+        guard let hostView = getEmbeddingView() else {
+            return false
+        }
+
+        log.verbose("Embedding video output into macOS host NSView via --wid=\(option.vo.WinID)")
+
+        if view == nil {
+            initView(vo, layer)
+        }
+        guard let view = self.view else {
+            log.error("Something went wrong, no View was initialized")
+            exit(1)
+        }
+
+        if view.superview !== hostView {
+            view.removeFromSuperview()
+            hostView.addSubview(view, positioned: .below, relativeTo: nil)
+        }
+
+        view.frame = hostView.bounds
+        view.autoresizingMask = [.width, .height]
+        let scale = hostView.window?.backingScaleFactor ??
+                    max(hostView.convertToBacking(NSRect(x: 0, y: 0, width: 1, height: 1)).size.width, 1)
+        view.layer?.contentsScale = scale
+        embeddedView = hostView
+        titleBar = nil
+        return true
+    }
+
+    func uninitEmbeddedView() {
+        embeddedView = nil
+        view?.removeFromSuperview()
+    }
+
     func initWindowState() {
         if option.vo.fullscreen {
             DispatchQueue.main.async {
@@ -154,7 +233,7 @@ class Common: NSObject {
         window?.orderOut(nil)
 
         titleBar?.removeFromSuperview()
-        view?.removeFromSuperview()
+        uninitEmbeddedView()
     }
 
     func displayLinkCallback(_ displayLink: CVDisplayLink,
@@ -188,7 +267,7 @@ class Common: NSObject {
     }
 
     func updateDisplaylink() {
-        guard let screen = window?.screen, let link = self.link else {
+        guard let screen = getCurrentScreen(), let link = self.link else {
             log.warning("Couldn't update DisplayLink, no Screen or DisplayLink available")
             return
         }
@@ -313,7 +392,7 @@ class Common: NSObject {
     var reconfigureCallback: CGDisplayReconfigurationCallBack = { (display, flags, userInfo) in
         if flags.contains(.setModeFlag) {
             let com = unsafeBitCast(userInfo, to: Common.self)
-            let displayID = com.window?.screen?.displayID ?? display
+            let displayID = com.getCurrentScreen()?.displayID ?? display
 
             if displayID == display {
                 com.log.verbose("Detected display mode change, updating screen refresh rate")
@@ -404,7 +483,7 @@ class Common: NSObject {
     }
 
     func getCurrentScreen() -> NSScreen? {
-         return window != nil ? window?.screen :
+         return currentWindow?.screen ??
                                     getTargetScreen(forFullscreen: false) ??
                                     NSScreen.main
     }
@@ -555,7 +634,7 @@ class Common: NSObject {
             fps.pointee = currentFps()
             return VO_TRUE
         case VOCTRL_GET_WINDOW_ID:
-            guard let window = window else {
+            guard let window = currentWindow else {
                 return VO_NOTAVAIL
             }
             let wid = data!.assumingMemoryBound(to: Int64.self)
@@ -605,8 +684,13 @@ class Common: NSObject {
         case VOCTRL_GET_UNFS_WINDOW_SIZE:
             let sizeData = data!.assumingMemoryBound(to: Int32.self)
             let size = UnsafeMutableBufferPointer(start: sizeData, count: 2)
-            let rect = (Bool(option.vo.hidpi_window_scale) ? window?.unfsContentFrame
-                : window?.unfsContentFramePixel) ?? NSRect(x: 0, y: 0, width: 1280, height: 720)
+            let embeddedRect = embeddedView != nil ? view.map {
+                Bool(option.vo.hidpi_window_scale) ? $0.bounds : $0.convertToBacking($0.bounds)
+            } : nil
+            let rect = embeddedRect ??
+                       (Bool(option.vo.hidpi_window_scale) ? window?.unfsContentFrame
+                       : window?.unfsContentFramePixel) ??
+                       NSRect(x: 0, y: 0, width: 1280, height: 720)
 
             size[0] = Int32(rect.size.width)
             size[1] = Int32(rect.size.height)
@@ -616,6 +700,10 @@ class Common: NSObject {
             let size = UnsafeBufferPointer(start: sizeData, count: 2)
             var rect = NSRect(x: 0, y: 0, width: CGFloat(size[0]), height: CGFloat(size[1]))
             DispatchQueue.main.async {
+                if self.embeddedView != nil {
+                    self.windowDidResize()
+                    return
+                }
                 if let screen = self.window?.currentScreen, !Bool(self.option.vo.hidpi_window_scale) {
                     rect = screen.convertRectFromBacking(rect)
                 }
